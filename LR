@@ -1,0 +1,175 @@
+import numpy as np 
+import pandas as pd 
+from sklearn.experimental import enable_iterative_imputer 
+from sklearn.impute import IterativeImputer 
+from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold, cross_val_score 
+from sklearn.linear_model import LogisticRegression 
+from sklearn.calibration import CalibratedClassifierCV 
+from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix, brier_score_loss, make_scorer, matthews_corrcoef) 
+from sklearn.preprocessing import StandardScaler 
+
+  
+
+# Load both continuous and discrete datasets 
+file_path = 'Filtered_Endometriosis_Split4.xlsx' 
+continuous_data = pd.read_excel(file_path, sheet_name="Continuous") 
+discrete_data = pd.read_excel(file_path, sheet_name="Discrete") 
+  
+
+# Ensure the target column is the same in both datasets 
+y_cont = continuous_data['Endometriosis_Status'] 
+y_disc = discrete_data['Endometriosis_Status'] 
+assert (y_cont == y_disc).all(), "Target columns do not match between continuous and discrete data." 
+
+  
+
+# Define features and target 
+X_cont = continuous_data.drop(columns=['Endometriosis_Status'])  
+X_disc = discrete_data.drop(columns=['Endometriosis_Status'])     
+X = pd.concat([X_cont, X_disc], axis=1)  
+y = y_cont   
+
+  
+
+# Split the data into training and testing sets 
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.20, random_state=42, stratify=y) 
+
+  
+
+# Impute missing data  
+imputer = IterativeImputer(max_iter=50, random_state=0) 
+  
+
+# Separate continuous and discrete features for imputation and scaling 
+X_train_cont = X_train[X_cont.columns] 
+X_train_disc = X_train[X_disc.columns] 
+X_test_cont = X_test[X_cont.columns] 
+X_test_disc = X_test[X_disc.columns] 
+
+ 
+
+# Impute missing data  
+X_train_cont_imputed = imputer.fit_transform(X_train_cont) 
+X_test_cont_imputed = imputer.transform(X_test_cont) 
+X_train_disc_imputed = imputer.fit_transform(X_train_disc) 
+X_test_disc_imputed = imputer.transform(X_test_disc) 
+
+  
+
+# Scale only the continuous features 
+scaler = StandardScaler() 
+X_train_cont_scaled = scaler.fit_transform(X_train_cont_imputed) 
+X_test_cont_scaled = scaler.transform(X_test_cont_imputed) 
+
+  
+
+# Combine scaled continuous features with unscaled discrete features 
+X_train_scaled = np.concatenate([X_train_cont_scaled, X_train_disc_imputed], axis=1) 
+X_test_scaled = np.concatenate([X_test_cont_scaled, X_test_disc_imputed], axis=1) 
+
+  
+
+# Define Logistic Regression model 
+log_model = LogisticRegression(solver='liblinear', random_state=42) 
+  
+
+# Define the parameter grid for GridSearchCV 
+param_grid = { 
+    'C': [0.01, 0.1, 1, 10, 100],   
+    'penalty': ['l1', 'l2']   
+} 
+
+  
+
+# Define AUC as the scoring metric 
+auc_scorer = make_scorer(roc_auc_score) 
+
+  
+
+# Use stratified cross-validation 
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42) 
+
+  
+
+# Initialize GridSearchCV with Logistic Regression 
+grid_search = GridSearchCV( 
+    log_model, param_grid=param_grid, cv=cv, n_jobs=-1, verbose=1, scoring=auc_scorer 
+) 
+
+  
+
+# Fit GridSearchCV & get best model 
+grid_search.fit(X_train_scaled, y_train) 
+best_log_model = grid_search.best_estimator_ 
+   
+
+
+# Calibrate the best logistic regression model 
+calibrated_log_model = CalibratedClassifierCV(best_log_model, cv=5, method='sigmoid') 
+calibrated_log_model.fit(X_train_scaled, y_train) 
+
+  
+
+# Make predictions on the test set 
+lr_y_pred = calibrated_log_model.predict(X_test_scaled) 
+lr_y_pred_proba = calibrated_log_model.predict_proba(X_test_scaled)[:, 1] 
+
+  
+
+# Evaluate model performance on the test set  
+metrics = { 
+    'Accuracy': accuracy_score(y_test, lr_y_pred), 
+    'Precision': precision_score(y_test, lr_y_pred), 
+    'Recall': recall_score(y_test, lr_y_pred), 
+    'F1-score': f1_score(y_test, lr_y_pred), 
+    'AUC': roc_auc_score(y_test, lr_y_pred_proba), 
+    'Brier Score': brier_score_loss(y_test, lr_y_pred_proba) 
+} 
+
+ 
+
+# Output the best parameters 
+print(f"Best parameters found: {grid_search.best_params_}") 
+
+ 
+
+# Calculate confusion matrix 
+tn, fp, fn, tp = confusion_matrix(y_test, lr_y_pred).ravel() 
+
+ 
+
+# Calculate sensitivity and specificity 
+metrics['Specificity'] = tn / (tn + fp) 
+metrics['Sensitivity'] = tp / (tp + fn) 
+
+ 
+
+# Print all metrics 
+print("Calibrated Logistic Regression Model Metrics:") 
+for metric, value in metrics.items(): 
+    print(f"{metric}: {value:.4f}") 
+
+  
+
+# Perform cross-validation on the base logistic model for comparison 
+cv_scores = cross_val_score(best_log_model, X_train_scaled, y_train, cv=cv, scoring='roc_auc') 
+print(f"\nLogistic Model Cross-validation AUC scores: {cv_scores}") 
+print(f"Logistic Model Mean CV AUC score: {np.mean(cv_scores):.4f}") 
+
+  
+
+# Compare calibrated vs non-calibrated probabilities 
+base_proba = best_log_model.predict_proba(X_test_scaled)[:, 1] 
+base_brier = brier_score_loss(y_test, base_proba) 
+
+  
+
+print("\nModel Calibration Comparison:") 
+print(f"Base Model Brier Score: {base_brier:.4f}") 
+print(f"Calibrated Model Brier Score: {metrics['Brier Score']:.4f}") 
+
+  
+
+# Save predictions for AUC ROC 
+np.save('lr_probs.npy', lr_y_pred_proba) 
+np.save('lr_y_test.npy', y_test) 
