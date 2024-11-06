@@ -1,0 +1,119 @@
+import pandas as pd 
+import joblib 
+import numpy as np   
+from sklearn.pipeline import Pipeline 
+from sklearn.preprocessing import StandardScaler 
+from sklearn.experimental import enable_iterative_imputer 
+from sklearn.impute import IterativeImputer 
+from sklearn.model_selection import GridSearchCV, StratifiedKFold, train_test_split 
+from sklearn.neural_network import MLPClassifier 
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix 
+
+ 
+
+# Load both continuous and discrete datasets 
+file_path = 'Filtered_Endometriosis_Split4.xlsx' 
+continuous_data = pd.read_excel(file_path, sheet_name="Continuous") 
+discrete_data = pd.read_excel(file_path, sheet_name="Discrete") 
+
+ 
+
+# Ensure the target column is the same in both datasets 
+y_cont = continuous_data['Endometriosis_Status'] 
+y_disc = discrete_data['Endometriosis_Status'] 
+assert (y_cont == y_disc).all(), "Target columns do not match between continuous and discrete data." 
+
+ 
+
+# Define features and target 
+X_cont = continuous_data.drop(columns=['Endometriosis_Status'])  
+X_disc = discrete_data.drop(columns=['Endometriosis_Status'])  
+X = pd.concat([X_cont, X_disc], axis=1)  
+y = y_cont 
+
+  
+
+# Split the dataset into training and testing sets 
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.20, random_state=42, stratify=y) 
+
+  
+
+# Define the pipeline with imputation, scaling, and classifier 
+pipeline = Pipeline([ 
+    ('imputer', IterativeImputer(max_iter=50, random_state=0)),  
+    ('scaler', StandardScaler()),                                 
+    ('classifier', MLPClassifier(max_iter=1300, random_state=42)) 
+]) 
+
+  
+
+# Define the parameter grid for GridSearchCV 
+param_grid = { 
+    'classifier__hidden_layer_sizes': [(50, 50, 50), (50, 100, 50), (100,)],  # Different architectures for the hidden layers 
+    'classifier__activation': ['tanh', 'relu'],  
+    'classifier__solver': ['sgd', 'adam'],      
+    'classifier__alpha': [0.0001, 0.05],          
+    'classifier__learning_rate': ['constant', 'adaptive'],  
+} 
+
+  
+
+# Use stratified cross-validation 
+stratified_kfold = StratifiedKFold(n_splits=5, shuffle=True, random_state=42) 
+
+  
+
+# GridSearchCV with the pipeline 
+grid_search = GridSearchCV( 
+    estimator=pipeline, 
+    param_grid=param_grid, 
+    cv=stratified_kfold,  
+    scoring='roc_auc',   
+    n_jobs=-1,   verbose=1             
+
+) 
+
+  
+
+# Fit the grid search & get best model 
+grid_search.fit(X_train, y_train) 
+best_mlp = grid_search.best_estimator_ 
+
+  
+
+# Make predictions on the test set 
+y_pred = best_mlp.predict(X_test) 
+y_pred_prob = best_mlp.predict_proba(X_test)[:, 1] 
+
+  
+
+# Evaluate the model performance on test set 
+accuracy = accuracy_score(y_test, y_pred) 
+precision = precision_score(y_test, y_pred) 
+recall = recall_score(y_test, y_pred) 
+f1 = f1_score(y_test, y_pred) 
+roc_auc = roc_auc_score(y_test, y_pred_prob) 
+conf_matrix = confusion_matrix(y_test, y_pred) 
+tn, fp, fn, tp = conf_matrix.ravel() 
+specificity = tn / (tn + fp) 
+
+  
+
+# Print the results 
+print(f"Best Parameters: {grid_search.best_params_}") 
+print(f"Accuracy: {accuracy:.4f}") 
+print(f"Precision: {precision:.4f}") 
+print(f"Specificity: {specificity:.4f}") 
+print(f"Recall: {recall:.4f}") 
+print(f"ROC AUC: {roc_auc:.4f}") 
+print(f"F1 Score: {f1:.4f}") 
+  
+
+# Save the best MLP model 
+joblib.dump(best_mlp, 'best_mlp_model.pkl') 
+
+  
+
+# Save for ROC AUC 
+np.save('mlp_probs.npy', y_pred_prob)   
+np.save('mlp_y_test.npy', y_test)  
