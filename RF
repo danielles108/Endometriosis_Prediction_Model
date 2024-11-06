@@ -1,0 +1,142 @@
+import numpy as np 
+import pandas as pd 
+from sklearn.experimental import enable_iterative_imputer 
+from sklearn.impute import IterativeImputer 
+from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold 
+from sklearn.ensemble import RandomForestClassifier 
+from sklearn.calibration import CalibratedClassifierCV 
+from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix, brier_score_loss, make_scorer) 
+from sklearn.utils import check_array 
+
+  
+
+# Load both continuous and discrete datasets 
+file_path = 'Filtered_Endometriosis_Split4.xlsx' 
+continuous_data = pd.read_excel(file_path, sheet_name="Continuous") 
+discrete_data = pd.read_excel(file_path, sheet_name="Discrete") 
+
+  
+
+# Ensure the target column is the same in both datasets 
+y_cont = continuous_data['Endometriosis_Status'] 
+y_disc = discrete_data['Endometriosis_Status'] 
+assert (y_cont == y_disc).all(), "Target columns do not match between continuous and discrete data." 
+
+  
+
+# Define features and target 
+X_cont = continuous_data.drop(columns=['Endometriosis_Status']) 
+X_disc = discrete_data.drop(columns=['Endometriosis_Status']) 
+X = pd.concat([X_cont, X_disc], axis=1) 
+y = y_cont 
+
+  
+
+# Split the data into training and testing sets 
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.20, random_state=42, stratify=y) 
+  
+
+# Impute missing data 
+imputer = IterativeImputer(max_iter=0, random_state=0) 
+X_train_imputed = imputer.fit_transform(X_train) 
+X_test_imputed = imputer.transform(X_test) 
+  
+
+# Ensure no NaNs are left after imputation 
+X_train_imputed = check_array(X_train_imputed, force_all_finite=True) 
+X_test_imputed = check_array(X_test_imputed, force_all_finite=True) 
+
+  
+
+# Define the parameter grid for GridSearchCV 
+param_grid = { 
+    'n_estimators': [100, 200], 
+    'max_depth': [10, 20, 30], 
+    'min_samples_split': [2, 5], 
+    'min_samples_leaf': [1, 2], 
+    'max_features': ['sqrt'], 
+    'bootstrap': [True] 
+} 
+
+  
+
+# Define AUC as the scoring metric 
+auc_scorer = make_scorer(roc_auc_score) 
+  
+
+# Use stratified cross-validation  
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42) 
+
+  
+
+# Initialize GridSearchCV with RandomForestClassifier 
+grid_search = GridSearchCV( 
+    RandomForestClassifier(random_state=42), param_grid=param_grid, cv=cv,  
+    verbose=1, n_jobs=-1, scoring=auc_scorer 
+) 
+
+  
+
+# Fit GridSearchCV & get best model 
+grid_search.fit(X_train_imputed, y_train) 
+best_rf_model = grid_search.best_estimator_ 
+
+  
+
+# Best parameters from the grid search 
+best_params = grid_search.best_params_ 
+print(f"Best parameters found: {grid_search.best_params_}") 
+
+  
+
+# Calibrated the best Random Forest model 
+calibrated_rf_model = CalibratedClassifierCV(best_rf_model, cv=5, method='sigmoid')  
+calibrated_rf_model.fit(X_train_imputed, y_train) 
+
+  
+
+# Make predictions on the test set 
+y_pred = calibrated_rf_model.predict(X_test_imputed) 
+y_pred_proba = calibrated_rf_model.predict_proba(X_test_imputed)[:, 1] 
+
+  
+
+# Evaluate model performance on the test set 
+metrics = { 
+    'Accuracy': accuracy_score(y_test, y_pred), 
+    'Precision': precision_score(y_test, y_pred), 
+    'Recall': recall_score(y_test, y_pred), 
+    'F1-score': f1_score(y_test, y_pred), 
+    'AUC': roc_auc_score(y_test, y_pred_proba), 
+    'Brier Score': brier_score_loss(y_test, y_pred_proba), 
+} 
+
+  
+
+# Calculate confusion matrix 
+tn, fp, fn, tp = confusion_matrix(y_test, y_pred).ravel() 
+
+  
+
+# Calculate sensitivity and specificity  
+metrics['Specificity'] = tn / (tn + fp) 
+metrics['Sensitivity'] = tp / (tp + fn) 
+
+  
+
+# Print all metrics 
+print("Calibrated Random Forest Model Metrics:") 
+for metric, value in metrics.items(): 
+    print(f"{metric}: {value:.4f}") 
+
+  
+
+# Compare calibrated vs non-calibrated probabilities 
+base_proba = best_rf_model.predict_proba(X_test_imputed)[:, 1] 
+base_brier = brier_score_loss(y_test, base_proba) 
+
+  
+
+print("\nModel Calibration Comparison:") 
+print(f"Base Model Brier Score: {base_brier:.4f}") 
+print(f"Calibrated Model Brier Score: {metrics['Brier Score']:.4f}") 
