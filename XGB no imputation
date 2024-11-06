@@ -1,0 +1,118 @@
+import xgboost as xgb 
+import pandas as pd 
+import numpy as np  
+import matplotlib.pyplot as plt 
+from sklearn.model_selection import train_test_split, StratifiedKFold, GridSearchCV 
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score, confusion_matrix 
+
+  
+
+# Load the continuous and discrete datasets  
+fp = 'Filtered_Endometriosis_Split4.xlsx' 
+continuous = pd.read_excel(fp, sheet_name="Continuous") 
+discrete = pd.read_excel(fp, sheet_name="Discrete") 
+
+  
+
+# Define features and target 
+x_cont = continuous.iloc[:, :-1]  
+x_discrete = discrete.iloc[:, :-1]  
+
+  
+
+# Ensure the target column is the same in both datasets 
+y_cont = continuous.iloc[:, -1]   
+y_discrete = discrete.iloc[:, -1]   
+assert (y_cont == y_discrete).all() 
+
+ 
+
+# Combine continuous and discrete features 
+X_combined = pd.concat([x_cont, x_discrete], axis=1)  
+y_combined = y_cont 
+
+  
+
+# Split data into training and testing sets 
+X_train_combined, X_test_combined, y_train_combined, y_test_combined = train_test_split(X_combined, y_combined, test_size=0.20, random_state=42, stratify=y_combined) 
+
+  
+
+# Define the parameter grid for GridSearchCV 
+param_grid = { 
+    'max_depth': [3, 4, 5], 
+    'learning_rate': [0.0001, 0.001, 0.01, 0.1, 1], 
+    'n_estimators': [80, 100, 200], 
+    'subsample': [0.6, 0.8, 1.0], 
+    'colsample_bytree': [0.5, 0.6, 0.7], 
+    'reg_alpha': [0.01, 0.1, 1], 
+    'reg_lambda': [0.1, 1, 2] 
+} 
+
+  
+
+# Initialize the XGBoost model 
+xgb_model = xgb.XGBClassifier(objective='binary:logistic', eval_metric='logloss') 
+
+  
+
+# Use stratified cross-validation 
+stratified_kfold = StratifiedKFold(n_splits=5) 
+
+  
+
+# GridSearchCV 
+grid_search = GridSearchCV(estimator=xgb_model, param_grid=param_grid, scoring='roc_auc', cv=stratified_kfold, verbose=1, n_jobs=-1) 
+
+  
+
+# Fit the GridSearchCV & get the best model 
+grid_search.fit(X_train_combined, y_train_combined) 
+best_model = grid_search.best_estimator_ 
+
+  
+
+# Print Best Parameters 
+print(f"Best Parameters: {grid_search.best_params_}") 
+print(f"Best Cross-Validated AUC Score: {grid_search.best_score_:.4f}") 
+
+  
+
+# Make predictions on the test set 
+y_pred_proba = best_model.predict_proba(X_test_combined)[:, 1] 
+y_pred = best_model.predict(X_test_combined) 
+
+  
+
+# Evaluate the model performance on the test set 
+roc_auc = roc_auc_score(y_test_combined, y_pred_proba) 
+conf_matrix = confusion_matrix(y_test_combined, y_pred) 
+tn, fp, fn, tp = conf_matrix.ravel() 
+specificity = tn / (tn + fp) 
+sensitivity = tp / (tp + fn) 
+accuracy = accuracy_score(y_test_combined, y_pred) 
+precision = precision_score(y_test_combined, y_pred) 
+recall = recall_score(y_test_combined, y_pred) 
+f1 = f1_score(y_test_combined, y_pred) 
+
+  
+
+# Display results 
+print("\nFinal Model Performance on Test Set:") 
+print(f"Accuracy: {accuracy:.4f}") 
+print(f"Precision: {precision:.4f}") 
+print(f"Specificity: {specificity:.4f}") 
+print(f"Recall: {recall:.4f}") 
+print(f"ROC AUC: {roc_auc:.4f}") 
+print(f"F1 Score: {f1:.4f}") 
+
+  
+
+# Save the final model 
+best_model.save_model('xgboost_best_model.json') 
+
+  
+
+# Save for ROC AUC 
+np.save('xgb_probs.npy', y_pred_proba)   
+np.save('xgb_y_test.npy', y_test_combined)  
